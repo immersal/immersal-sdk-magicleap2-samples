@@ -28,6 +28,7 @@ namespace Immersal.XR.MagicLeap
 
         [SerializeField] private MLCameraDataProvider m_CameraDataProvider;
         [SerializeField] private bool m_SaveMapOnServer;
+        [SerializeField] private float m_CaptureInterval = 1.0f;
         [SerializeField] private float m_PointSize = 20f;
         [SerializeField] private Color m_PointColor = new Color(0.57f, 0.93f, 0.12f);
         [SerializeField] private ARSpace m_ArSpace;
@@ -201,6 +202,7 @@ namespace Immersal.XR.MagicLeap
                 while (m_IsMapping)
                 {
                     await RealtimeCapture();
+                    await Task.Delay((int)(m_CaptureInterval * 1000));
                 }
             }
             else
@@ -304,16 +306,7 @@ namespace Immersal.XR.MagicLeap
                 camPos = ARHelper.SwitchHandedness(camPos);
                 camRot *= Quaternion.Euler(0f, 0f, 180.0f);
                 Matrix4x4 m = ARHelper.SwitchHandedness(Matrix4x4.Rotate(camRot));
-                float[] rot = new float[9];
-                rot[0] = m.m00;
-                rot[1] = m.m01;
-                rot[2] = m.m02;
-                rot[3] = m.m10;
-                rot[4] = m.m11;
-                rot[5] = m.m12;
-                rot[6] = m.m20;
-                rot[7] = m.m21;
-                rot[8] = m.m22;
+                float[] rot = new float[9] { m.m00, m.m01, m.m02, m.m10, m.m11, m.m12, m.m20, m.m21, m.m22 };
 
                 Task<int> t = Task.Run(() =>
                 {

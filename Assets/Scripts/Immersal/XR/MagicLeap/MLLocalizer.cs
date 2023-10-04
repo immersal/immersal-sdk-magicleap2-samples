@@ -127,19 +127,26 @@ namespace Immersal.XR.MagicLeap
                 Quaternion camRot = data.CameraTransform.rotation;
                 Vector4 intrinsics = data.Intrinsics;
 
-                Vector3 pos = Vector3.zero;
-                Quaternion rot = Quaternion.identity;
-
                 float startTime = Time.realtimeSinceStartup;
 
-                Task<int> t = Task.Run(() =>
+                Task<LocalizeInfo> t = Task.Run(() =>
                 {
-                    return Immersal.Core.LocalizeImage(out pos, out rot, data.Width, data.Height, ref intrinsics, data.PixelBuffer);
+                    return Immersal.Core.LocalizeImage(data.Width, data.Height, ref intrinsics, data.PixelBuffer);
                 });
 
                 await t;
 
-                int mapHandle = t.Result;
+                LocalizeInfo locInfo = t.Result;
+
+                Matrix4x4 resultMatrix = Matrix4x4.identity;
+                resultMatrix.m00 = locInfo.r00; resultMatrix.m01 = locInfo.r01; resultMatrix.m02 = locInfo.r02; resultMatrix.m03 = locInfo.px;
+                resultMatrix.m10 = locInfo.r10; resultMatrix.m11 = locInfo.r11; resultMatrix.m12 = locInfo.r12; resultMatrix.m13 = locInfo.py;
+                resultMatrix.m20 = locInfo.r20; resultMatrix.m21 = locInfo.r21; resultMatrix.m22 = locInfo.r22; resultMatrix.m23 = locInfo.pz;
+
+                Vector3 pos = resultMatrix.GetColumn(3);
+                Quaternion rot = resultMatrix.rotation;
+
+                int mapHandle = locInfo.handle;
                 int mapId = ARMap.MapHandleToId(mapHandle);
                 float elapsedTime = Time.realtimeSinceStartup - startTime;
 

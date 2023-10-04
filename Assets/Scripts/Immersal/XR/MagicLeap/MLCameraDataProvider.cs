@@ -14,6 +14,8 @@ using System;
 using System.Linq;
 using System.Collections;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 using Unity.Collections.LowLevel.Unsafe;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
@@ -26,20 +28,46 @@ namespace Immersal.XR.MagicLeap
         [SerializeField] private bool verboseDebugLogging;
 
         public bool IsCameraConnected => captureCamera != null && captureCamera.ConnectionEstablished;
-        
+
         private GraphicsFormat pngFormat = GraphicsFormat.R8_UNorm;
-        private Camera cam;
-        private Transform cameraTransformAtLatestCapture;    
-        private List<MLCamera.StreamCapability> streamCapabilities;
-        private MLCamera captureCamera;
+
+        //Prevent accessing the pixelBuffer in two places as once 
+        //private readonly object bufferLock = new object();
+
+        #region Lastest Capture Data Data
+
+        private bool didGetFirstFrame;
         private MLCamera.CameraOutput capturedFrameInfo;
-        private MLCamera.PlaneInfo latestYUVPlane;
-        private bool cameraDeviceAvailable;
-        private bool isCapturingVideo = false;
-        private MLCamera.CaptureType captureType = MLCamera.CaptureType.Video;
-        private readonly MLPermissions.Callbacks permissionCallbacks = new MLPermissions.Callbacks();
         private MLCamera.IntrinsicCalibrationParameters? intrinsics;
         private byte[] pixelBuffer;
+        private Transform cameraTransformAtLatestCapture;
+
+        #endregion
+
+        #region Capture Config
+
+        private int targetImageWidth = 1920;
+        private int targetImageHeight = 1080;
+        private MLCamera.CaptureFrameRate targetFrameRate = MLCameraBase.CaptureFrameRate._30FPS;
+        private MLCamera.CaptureType captureType = MLCamera.CaptureType.Video;
+        private MLCamera.Identifier cameraIdentifier = MLCamera.Identifier.CV;
+
+        #endregion
+
+        #region Magic Leap Camera Info
+
+        //The connected Camera
+        private MLCamera captureCamera;
+
+        //Cached version of all the available streams and their sizes 
+        private MLCameraBase.StreamCapability[] streamCapabilities;
+
+        // True if CaptureVideoStartAsync was called successfully
+        private bool isCapturingVideo = false;
+
+        #endregion
+
+        private readonly MLPermissions.Callbacks permissionCallbacks = new MLPermissions.Callbacks();
 
         private void Awake()
         {
@@ -48,10 +76,10 @@ namespace Immersal.XR.MagicLeap
             permissionCallbacks.OnPermissionDeniedAndDontAskAgain += OnPermissionDenied;
 
             isCapturingVideo = false;
-
+            var cameraPose = new GameObject("cameraTransformAtLatestCapture");
+            DontDestroyOnLoad(cameraPose);
+            cameraTransformAtLatestCapture = cameraPose.transform;
             MLPermissions.RequestPermission(MLPermission.Camera, permissionCallbacks);
-
-            cam = Camera.main;
         }
 
         private void OnDisable()
@@ -64,7 +92,7 @@ namespace Immersal.XR.MagicLeap
             intr = Vector4.zero;
             dist = new double[5];
 
-            if (!(this.intrinsics is MLCamera.IntrinsicCalibrationParameters intrinsicsValue))
+            if (this.intrinsics is not { } intrinsicsValue)
             {
                 return false;
             }
@@ -86,6 +114,9 @@ namespace Immersal.XR.MagicLeap
         {
             data = default;
 
+            if (capturedFrameInfo.Planes is null || capturedFrameInfo.Planes.Length <= 0) return false;
+
+            var latestYUVPlane = capturedFrameInfo.Planes[0];
             if (latestYUVPlane.Data is null || latestYUVPlane.Data.Length <= 0) return false;
             if (!TryAcquireIntrinsics(out Vector4 intrinsics, out double[] distortion)) return false;
 
@@ -97,15 +128,15 @@ namespace Immersal.XR.MagicLeap
             {
                 fixed (byte* pinnedData = processedImageData)
                 {
-                    data.PixelBuffer = (IntPtr)pinnedData;
+                    data.PixelBuffer = (IntPtr) pinnedData;
                 }
             }
 
             data.CameraTransform = cameraTransformAtLatestCapture;
             data.Intrinsics = intrinsics;
             data.Distortion = distortion;
-            data.Width = (int)latestYUVPlane.Width;
-            data.Height = (int)latestYUVPlane.Height;
+            data.Width = (int) latestYUVPlane.Width;
+            data.Height = (int) latestYUVPlane.Height;
 
             return data.PixelBuffer != IntPtr.Zero;
         }
@@ -115,120 +146,230 @@ namespace Immersal.XR.MagicLeap
             data = default;
             pngBytes = null;
 
+            if (capturedFrameInfo.Planes is null || capturedFrameInfo.Planes.Length <= 0) return false;
+            var latestYUVPlane = capturedFrameInfo.Planes[0];
             if (latestYUVPlane.Data is null || latestYUVPlane.Data.Length <= 0) return false;
             if (!TryAcquireIntrinsics(out Vector4 intrinsics, out double[] distortion)) return false;
 
             data.CameraTransform = cameraTransformAtLatestCapture;
             data.Intrinsics = intrinsics;
             data.Distortion = distortion;
-            data.Width = (int)latestYUVPlane.Width;
-            data.Height = (int)latestYUVPlane.Height;
+            data.Width = (int) latestYUVPlane.Width;
+            data.Height = (int) latestYUVPlane.Height;
 
             GetUnpaddedBytes(latestYUVPlane, true, out byte[] grayBytes);
 
             const uint channel = 1;
-            pngBytes = ImageConversion.EncodeArrayToPNG(grayBytes, pngFormat, latestYUVPlane.Width, latestYUVPlane.Height, latestYUVPlane.Width * channel);
+            pngBytes = ImageConversion.EncodeArrayToPNG(grayBytes, pngFormat, latestYUVPlane.Width,
+                latestYUVPlane.Height, latestYUVPlane.Width * channel);
 
             return !(pngBytes is null || pngBytes.Length <= 0);
         }
 
         private void GetUnpaddedBytes(MLCamera.PlaneInfo yBuffer, bool invertVertically, out byte[] outputBuffer)
         {
-            byte[] data = yBuffer.Data;
-            int width = (int)yBuffer.Width, height = (int)yBuffer.Height, size = width * height;
-            int stride = invertVertically ? -(int)yBuffer.Stride : (int)yBuffer.Stride;
-            int invertStartOffset = ((int)yBuffer.Stride * height) - (int)yBuffer.Stride;
-
-            // use the same buffer internally
-            if (pixelBuffer is null || pixelBuffer.Length != size)
+          //  lock (bufferLock)
             {
-                pixelBuffer = new byte[size];
-            }
+                byte[] data = yBuffer.Data;
+                int width = (int) yBuffer.Width;
+                int height = (int) yBuffer.Height, size = width * height;
+                int stride = invertVertically ? -(int) yBuffer.Stride : (int) yBuffer.Stride;
+                int invertStartOffset = ((int) yBuffer.Stride * height) - (int) yBuffer.Stride;
 
-            unsafe
-            {
-                fixed (byte* pinnedData = data, dstPtr = pixelBuffer)
+                // use the same buffer internally
+                if (pixelBuffer is null || pixelBuffer.Length != size)
                 {
-                    byte* srcPtr = invertVertically ? pinnedData + invertStartOffset : pinnedData;
-                    if (width > 0 && height > 0) {
-                        UnsafeUtility.MemCpyStride(dstPtr, width, srcPtr, stride, width, height);
+                    pixelBuffer = new byte[size];
+                }
+
+                unsafe
+                {
+                    fixed (byte* pinnedData = data, dstPtr = pixelBuffer)
+                    {
+                        byte* srcPtr = invertVertically ? pinnedData + invertStartOffset : pinnedData;
+                        if (width > 0 && height > 0)
+                        {
+                            UnsafeUtility.MemCpyStride(dstPtr, width, srcPtr, stride, width, height);
+                        }
                     }
                 }
-            }
 
-            outputBuffer = pixelBuffer;
+                outputBuffer = pixelBuffer;
+            }
         }
 
         private void OnPermissionGranted(string permission)
         {
-    #if UNITY_ANDROID
+#if UNITY_ANDROID
             MLPluginLog.Debug($"Granted {permission}.");
             TryEnableMLCamera();
-    #endif
+#endif
         }
+
+        private void OnDestroy()
+        {
+            DisconnectCamera();
+        }
+
+/*        private void OnApplicationPause(bool isPaused)
+        {
+            if (isPaused)
+            {
+                DisconnectCamera();
+            }
+            else if (!IsCameraConnected && MLPermissions.CheckPermission(MLPermission.Camera).IsOk)
+            {
+                TryEnableMLCamera();
+            }
+        }*/
 
         private void OnPermissionDenied(string permission)
         {
             if (permission == MLPermission.Camera)
             {
-    #if UNITY_ANDROID
+#if UNITY_ANDROID
                 MLPluginLog.Error($"{permission} denied, example won't function.");
-    #endif
+#endif
             }
         }
 
-        private void TryEnableMLCamera()
+        private async void TryEnableMLCamera()
         {
             if (!MLPermissions.CheckPermission(MLPermission.Camera).IsOk)
                 return;
-
-            StartCoroutine(EnableMLCamera());
+            await EnableMLCameraAsync();
         }
 
         /// <summary>
         /// Connects the MLCamera component and instantiates a new instance
         /// if it was never created.
         /// </summary>
-        private IEnumerator EnableMLCamera()
+        private async Task EnableMLCameraAsync()
         {
+            bool cameraDeviceAvailable = false;
             while (!cameraDeviceAvailable)
             {
                 MLResult result =
-                    MLCamera.GetDeviceAvailabilityStatus(MLCamera.Identifier.CV, out cameraDeviceAvailable);
+                    MLCamera.GetDeviceAvailabilityStatus(cameraIdentifier, out cameraDeviceAvailable);
                 if (!(result.IsOk && cameraDeviceAvailable))
                 {
-                    // Wait until camera device is available
-                    yield return new WaitForSeconds(1.0f);
+                    // Wait until the camera device is available
+                    await Task.Delay(TimeSpan.FromSeconds(1.0f));
                 }
             }
 
-            Log("Camera device available");
-
-            yield return new WaitForSeconds(1.0f);
-            ConnectCamera();
-
-            yield return new WaitForSeconds(1.0f);
-            StartVideoCapture();
+            // Camera device is available now
+            Debug.Log("Camera device is available.");
+            await StartCameraCaptureAsync();
         }
 
-        /// <summary>
-        /// Connects to the MLCamera.
-        /// </summary>
-        private void ConnectCamera()
+        private async Task StartCameraCaptureAsync()
         {
-            MLCamera.ConnectContext context = MLCamera.ConnectContext.Create();
-            context.CamId = MLCamera.Identifier.CV;
+            try
+            {
+                Debug.Log("StartCameraCaptureAsync started.");
+
+                MLCameraBase.ConnectContext context = new MLCameraBase.ConnectContext();
+
+                context = CreateCameraContext();
+
+                captureCamera = await MLCamera.CreateAndConnectAsync(context);
+                if (captureCamera == null)
+                {
+                    Debug.LogError("Could not create or connect to a valid camera. Stopping Capture.");
+                    return;
+                }
+
+                Debug.Log("Camera Connected");
+
+                bool hasImageStreamCapabilities = GetImageStreamCapabilities();
+                if (!hasImageStreamCapabilities)
+                {
+                    Debug.LogError("Could not start capture. No valid Image Streams available. Disconnecting Camera");
+                    await DisconnectCameraAsync();
+                    return;
+                }
+
+                captureCamera.OnRawVideoFrameAvailable += OnCaptureRawVideoFrameAvailable;
+
+                MLCameraBase.CaptureConfig captureConfig = new MLCameraBase.CaptureConfig();
+                captureConfig = CreateCaptureConfig();
+                Debug.Log("CreateCaptureConfig");
+
+                bool captureStarted = await PrepareAndStartCapture(captureConfig);
+                if (!captureStarted)
+                {
+                    Debug.LogError("Could not start capture. Disconnecting Camera");
+                    await DisconnectCameraAsync();
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"Error in StartCameraCaptureAsync: {ex.Message}");
+                throw;
+            }
+
+            Debug.Log("StartCameraCaptureAsync completed.");
+        }
+
+        private MLCamera.ConnectContext CreateCameraContext()
+        {
+            var context = MLCamera.ConnectContext.Create();
+            context.CamId = cameraIdentifier;
             context.Flags = MLCamera.ConnectFlag.CamOnly;
-            context.EnableVideoStabilization = true;
+            context.EnableVideoStabilization = false;
+            return context;
+        }
 
-            captureCamera = MLCamera.CreateAndConnect(context);
+        private MLCamera.CaptureConfig CreateCaptureConfig()
+        {
+            var captureConfig = new MLCamera.CaptureConfig();
+            captureConfig.CaptureFrameRate = targetFrameRate;
+            captureConfig.StreamConfigs = new MLCamera.CaptureStreamConfig[1];
+            captureConfig.StreamConfigs[0] =
+                MLCamera.CaptureStreamConfig.Create(GetStreamCapability(), MLCamera.OutputFormat.YUV_420_888);
+            return captureConfig;
+        }
 
+        private async Task<bool> PrepareAndStartCapture(MLCamera.CaptureConfig captureConfig)
+        {
+            var prepareResult = captureCamera.PrepareCapture(captureConfig, out MLCamera.Metadata _);
+            if (!MLResult.DidNativeCallSucceed(prepareResult.Result, nameof(captureCamera.PrepareCapture)))
+            {
+                Debug.LogError($"Could not start. Result: {prepareResult.Result}");
+                return false;
+            }
+
+            //Prepare auto exposure and white balance
+            var aeawbResult = await captureCamera.PreCaptureAEAWBAsync();
+
+            if (aeawbResult.IsOk && captureType == MLCamera.CaptureType.Video)
+            {
+                var startCapture = await captureCamera.CaptureVideoStartAsync();
+                isCapturingVideo =
+                    MLResult.DidNativeCallSucceed(startCapture.Result, nameof(captureCamera.CaptureVideoStart));
+                if (!isCapturingVideo)
+                {
+                    Debug.LogError($"Could not start camera capture. Result : {startCapture.Result}");
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private async Task DisconnectCameraAsync()
+        {
             if (captureCamera != null)
             {
-                if (GetImageStreamCapabilities())
-                {
-                    captureCamera.OnRawVideoFrameAvailable += OnCaptureRawVideoFrameAvailable;
-                }
+                if(isCapturingVideo)
+                    await captureCamera.CaptureVideoStopAsync();
+
+                await captureCamera.DisconnectAsync();
+                captureCamera.OnRawVideoFrameAvailable -= OnCaptureRawVideoFrameAvailable;
+                captureCamera = null;
+                streamCapabilities = null;
             }
         }
 
@@ -240,35 +381,13 @@ namespace Immersal.XR.MagicLeap
             if (captureCamera == null || !IsCameraConnected)
                 return;
 
-            streamCapabilities = null;
+            if (isCapturingVideo)
+                captureCamera.CaptureVideoStop();
 
-            captureCamera.OnRawVideoFrameAvailable -= OnCaptureRawVideoFrameAvailable;
             captureCamera.Disconnect();
-        }
-
-        /// <summary>
-        /// Captures a preview of the device's camera and displays it in front of the user.
-        /// </summary>
-        private void StartVideoCapture()
-        {
-            MLCamera.CaptureConfig captureConfig = new MLCamera.CaptureConfig();
-            captureConfig.CaptureFrameRate = MLCamera.CaptureFrameRate._30FPS;
-            captureConfig.StreamConfigs = new MLCamera.CaptureStreamConfig[1];
-            captureConfig.StreamConfigs[0] =
-                MLCamera.CaptureStreamConfig.Create(GetStreamCapability(), MLCamera.OutputFormat.YUV_420_888);
-
-            MLResult result = captureCamera.PrepareCapture(captureConfig, out MLCamera.Metadata _);
-
-            if (MLResult.DidNativeCallSucceed(result.Result, nameof(captureCamera.PrepareCapture)))
-            {
-                captureCamera.PreCaptureAEAWB();
-
-                if (captureType == MLCamera.CaptureType.Video)
-                {
-                    result = captureCamera.CaptureVideoStart();
-                    isCapturingVideo = MLResult.DidNativeCallSucceed(result.Result, nameof(captureCamera.CaptureVideoStart));
-                }
-            }
+            captureCamera.OnRawVideoFrameAvailable -= OnCaptureRawVideoFrameAvailable;
+            streamCapabilities = null;
+            captureCamera = null;
         }
 
         /// <summary>
@@ -276,17 +395,15 @@ namespace Immersal.XR.MagicLeap
         /// </summary>
         private MLCamera.StreamCapability GetStreamCapability()
         {
-            foreach (var streamCapability in streamCapabilities.Where(s => s.CaptureType == captureType))
+            if (MLCamera.TryGetBestFitStreamCapabilityFromCollection(streamCapabilities, targetImageWidth,
+                    targetImageHeight, MLCameraBase.CaptureType.Video,
+                    out MLCameraBase.StreamCapability streamCapability))
             {
-                Log(streamCapability.ToString());
-                // option: 640x480, 1280x720, 1920x1080, 3840x2160
-//                if (streamCapability.Width == 1920 && streamCapability.Height == 1080)
-                if (streamCapability.Width == 1280 && streamCapability.Height == 960)
-                {
-                    return streamCapability;
-                }
+                Log($"{streamCapability.ToString()} is selected!");
+                return streamCapability;
             }
-            Log($"{streamCapabilities.ToString()} is selected!");
+
+            Log($"{streamCapabilities[0]} is selected!");
             return streamCapabilities[0];
         }
 
@@ -296,27 +413,17 @@ namespace Immersal.XR.MagicLeap
         /// <returns>True if MLCamera returned at least one stream capability.</returns>
         private bool GetImageStreamCapabilities()
         {
-            var result =
-                captureCamera.GetStreamCapabilities(out MLCamera.StreamCapabilitiesInfo[] streamCapabilitiesInfo);
-
-            if (!result.IsOk)
+            if (captureCamera == null)
             {
-                Log("Could not get Stream capabilities Info.");
+                Log("Could not get Stream capabilities Info. No Camera Connected");
                 return false;
             }
+            streamCapabilities =
+                MLCamera.GetImageStreamCapabilitiesForCamera(captureCamera, MLCameraBase.CaptureType.Video);
 
-            streamCapabilities = new List<MLCamera.StreamCapability>();
-
-            for (int i = 0; i < streamCapabilitiesInfo.Length; i++)
-            {
-                foreach (var streamCap in streamCapabilitiesInfo[i].StreamCapabilities)
-                {
-                    streamCapabilities.Add(streamCap);
-                }
-            }
-
-            return streamCapabilities.Count > 0;
+            return streamCapabilities.Length > 0;
         }
+
 
         /// <summary>
         /// Handles the event of a new image getting captured.
@@ -324,27 +431,16 @@ namespace Immersal.XR.MagicLeap
         /// <param name="capturedFrame">Captured Frame.</param>
         /// <param name="resultExtras">Result Extra.</param>
         private void OnCaptureRawVideoFrameAvailable(MLCamera.CameraOutput capturedFrame,
-                                                    MLCamera.ResultExtras resultExtras,
-                                                    MLCamera.Metadata metadata)
+            MLCamera.ResultExtras resultExtras,
+            MLCamera.Metadata metadata)
         {
-            capturedFrameInfo = capturedFrame;
-            latestYUVPlane = capturedFrameInfo.Planes[0];
-            cameraTransformAtLatestCapture = cam.transform;
-            intrinsics = resultExtras.Intrinsics;
-        }
-
-        void DisplayData(MLCamera.IntrinsicCalibrationParameters cameraParameters)
-        {
-            Debug.LogFormat("Width: {0}", cameraParameters.Width);
-            Debug.LogFormat("Height: {0}", cameraParameters.Height);
-            Debug.LogFormat("FocalLength: {0}", cameraParameters.FocalLength);
-            Debug.LogFormat("PrincipalPoint: {0}", cameraParameters.PrincipalPoint);
-            Debug.LogFormat("FOV: {0}", cameraParameters.FOV);
-            int index = 0;
-            foreach (double dist in cameraParameters.Distortion)
+            MLResult result = MLCVCamera.GetFramePose(resultExtras.VCamTimestamp, out Matrix4x4 outMatrix);
+            if (result.IsOk)
             {
-                Debug.LogFormat("Distortion({0}): {1}", index, dist);
-                index++;
+                capturedFrameInfo = capturedFrame;
+                cameraTransformAtLatestCapture.position = outMatrix.GetPosition();
+                cameraTransformAtLatestCapture.rotation = outMatrix.rotation;
+                intrinsics = resultExtras.Intrinsics;
             }
         }
 
