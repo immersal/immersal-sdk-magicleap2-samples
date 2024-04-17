@@ -1,6 +1,6 @@
 #if !UNITY_IOS
 /*===============================================================================
-Copyright (C) 2023 Immersal - Part of Hexagon. All Rights Reserved.
+Copyright (C) 2024 Immersal - Part of Hexagon. All Rights Reserved.
 
 This file is part of the Immersal SDK.
 
@@ -211,7 +211,7 @@ namespace Immersal.XR.MagicLeap
             DisconnectCamera();
         }
 
-/*        private void OnApplicationPause(bool isPaused)
+        private void OnApplicationPause(bool isPaused)
         {
             if (isPaused)
             {
@@ -221,7 +221,7 @@ namespace Immersal.XR.MagicLeap
             {
                 TryEnableMLCamera();
             }
-        }*/
+        }
 
         private void OnPermissionDenied(string permission)
         {

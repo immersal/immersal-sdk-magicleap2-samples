@@ -1,5 +1,5 @@
 ﻿/*===============================================================================
-Copyright (C) 2023 Immersal - Part of Hexagon. All Rights Reserved.
+Copyright (C) 2024 Immersal - Part of Hexagon. All Rights Reserved.
 
 This file is part of the Immersal SDK.
 

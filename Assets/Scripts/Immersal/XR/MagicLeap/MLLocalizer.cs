@@ -1,6 +1,6 @@
 #if !UNITY_IOS
 /*===============================================================================
-Copyright (C) 2023 Immersal - Part of Hexagon. All Rights Reserved.
+Copyright (C) 2024 Immersal - Part of Hexagon. All Rights Reserved.
 
 This file is part of the Immersal SDK.
 
@@ -127,10 +127,22 @@ namespace Immersal.XR.MagicLeap
                 Quaternion camRot = data.CameraTransform.rotation;
                 Vector4 intrinsics = data.Intrinsics;
 
+                float[] rotArray = new float[4];
+                if (SolverType == SolverType.Lean)
+                {
+                    Quaternion qRot = data.CameraTransform.rotation;
+                    qRot *= Quaternion.Euler(0f, 0f, 180f);
+                    qRot = ARHelper.SwitchHandedness(qRot);
+                    rotArray = new float[4] { qRot.x, qRot.y, qRot.z, qRot.w };
+                }
+
                 float startTime = Time.realtimeSinceStartup;
 
                 Task<LocalizeInfo> t = Task.Run(() =>
                 {
+                    if (SolverType == SolverType.Lean)
+                        return Immersal.Core.LocalizeImage(data.Width, data.Height, ref intrinsics, data.PixelBuffer, rotArray);
+                    
                     return Immersal.Core.LocalizeImage(data.Width, data.Height, ref intrinsics, data.PixelBuffer);
                 });
 
@@ -157,10 +169,7 @@ namespace Immersal.XR.MagicLeap
                     rot = ARHelper.SwitchHandedness(rot);
 
                     LocalizerDebugLog(string.Format("Relocalized in {0} seconds", elapsedTime));
-
                     stats.localizationSuccessCount++;
-
-                    ARMap map = ARSpace.mapIdToMap[mapId];
 
                     if (mapId != lastLocalizedMapId)
                     {
@@ -188,6 +197,8 @@ namespace Immersal.XR.MagicLeap
 
                     GetLocalizerPose(out lastLocalizedPose, mapId, pos, rot, m.inverse);
                     OnPoseFound?.Invoke(lastLocalizedPose);
+
+                    ARMap map = ARSpace.mapIdToMap[mapId];
                     map.NotifySuccessfulLocalization(mapId);
                 }
                 else
@@ -221,9 +232,20 @@ namespace Immersal.XR.MagicLeap
                 Quaternion camRot = data.CameraTransform.rotation;
                 Vector4 intrinsics = data.Intrinsics;
 
-                j.mapIds = mapIds;
-                j.intrinsics = intrinsics;
                 j.image = pngBytes;
+                j.intrinsics = intrinsics;
+                j.mapIds = mapIds;
+                
+                j.solverType = (int)SolverType;
+                float[] rotArray = new float[4];
+                if (SolverType == SolverType.Lean)
+                {
+                    Quaternion qRot = m_Cam.transform.rotation;
+                    qRot *= Quaternion.Euler(0f, 0f, 180f);
+                    qRot = ARHelper.SwitchHandedness(qRot);
+                    rotArray = new float[4] { qRot.x, qRot.y, qRot.z, qRot.w };
+                }
+                j.camRot = rotArray;
 
                 RenderPreview(pngBytes);
                 
@@ -327,9 +349,20 @@ namespace Immersal.XR.MagicLeap
                 Quaternion camRot = data.CameraTransform.rotation;
                 Vector4 intrinsics = data.Intrinsics;
 
-                j.mapIds = mapIds;
-                j.intrinsics = intrinsics;
                 j.image = pngBytes;
+                j.intrinsics = intrinsics;
+                j.mapIds = mapIds;
+                
+                j.solverType = (int)SolverType;
+                float[] rotArray = new float[4];
+                if (SolverType == SolverType.Lean)
+                {
+                    Quaternion qRot = m_Cam.transform.rotation;
+                    qRot *= Quaternion.Euler(0f, 0f, 180f);
+                    qRot = ARHelper.SwitchHandedness(qRot);
+                    rotArray = new float[4] { qRot.x, qRot.y, qRot.z, qRot.w };
+                }
+                j.camRot = rotArray;
 
                 RenderPreview(pngBytes);
 
